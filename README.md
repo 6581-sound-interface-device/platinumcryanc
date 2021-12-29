@@ -2,7 +2,7 @@
 
 Platinum Crypto Ancienne is Cryanc built for Mac OS X Developer Preview 1, and tested secondarily on Developer Preview 2, each with Classilla 9.3.4. It may work on Rhapsody 5.1 or 5.2 if the latter ever sees release, but I don't have any computers that boot into PowerPC Rhapsody, so user discretion is advised.
 
-Generally, this software was written by Cameron Kaiser and crew. Any modification smade by me will be listed in the binary releases.
+Generally, this software was written by Cameron Kaiser and crew. Any modifications made by me will be listed in the binary releases.
 
 Original README.md:
 # Crypto Ancienne: TLS for the Internet of Old Things
