@@ -1,6 +1,6 @@
 /*
  * Crypto Ancienne Resource Loader "carl" (and example application)
- * Copyright 2020-1 Cameron Kaiser. All rights reserved.
+ * Copyright 2020-3 Cameron Kaiser and contributors. All rights reserved.
  * BSD license (see README.md)
  */
 
@@ -8,7 +8,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#if !defined(__AUX__) && (!defined(NS_TARGET_MAJOR) || (NS_TARGET_MAJOR > 3)) && !defined(__MACHTEN_68K__) && !defined(__sun) && !defined(__BEOS__) && (!defined(__hppa) && !defined(__hpux))
+#if !defined(__AUX__) && !defined(__AMIGA__) && (!defined(NS_TARGET_MAJOR) || (NS_TARGET_MAJOR > 3)) && !defined(__MACHTEN_68K__) && !defined(__sun) && !defined(__BEOS__) && (!defined(__hppa) && !defined(__hpux))
 #include <sys/select.h>
 #endif
 #include <netinet/in.h>
@@ -16,6 +16,9 @@
 
 #ifndef STDIN_FILENO
 #define STDIN_FILENO 0
+#endif
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
 #endif
 
 /* stdint or equivalent set here */
@@ -25,6 +28,9 @@ int quiet = 0;
 int proxy = 0;
 int http09 = 0;
 
+/* The BeOS port is bound by unusual constraints, partially by Metrowerks
+   cc, partially by the operating system. Some of the code here is
+   bizarre, but it's here because it works and passes tests. */
 #if defined(__BEOS__)
 #include <fcntl.h>
 #if defined(BONE_VERSION)
@@ -46,8 +52,10 @@ int stdin_pending() {
     if (i >= 0 && j > 0) return 1;
 
     /* "peek" at stdin (must already be non-blocking) */
-    return (read(fileno(stdin), &c, 0) >= 0);
+    return (read(STDIN_FILENO, &c, 0) >= 0);
 }
+#else
+#define stdin_pending() (FD_ISSET(STDIN_FILENO, &fdset))
 #endif
 
 void error(char *msg, int code) {
@@ -172,11 +180,11 @@ char *parse_url(char *url, char *hostname, size_t *port, size_t *proto) {
 }
 
 void help(int longdesc, char *me) {
-    fprintf(stderr, "Crypto Ancienne Resource Loader v1.5-git\n");
+    fprintf(stderr, "Crypto Ancienne Resource Loader v2.0-git\n");
     if (!longdesc) return;
 
     fprintf(stderr,
-"Copyright (C)2020-1 Cameron Kaiser and Contributors. All rights reserved.\n"
+"Copyright (C)2020-2 Cameron Kaiser and Contributors. All rights reserved.\n"
 "usage: %s [option] [url (optional if -p)]\n\n"
 "protocols: http https\n\n"
 "-h This message\n"
@@ -190,25 +198,31 @@ void help(int longdesc, char *me) {
 "-t No timeout (default is 10s)\n"
 "-u Upgrade HTTP requests to HTTPS transparently\n"
 "-s Spoof HTTP/1.1 replies as HTTP/1.0 (irrelevant without -H, -p or -i)\n"
+"-2 Negotiate TLS 1.2 instead of 1.3\n"
     , me);
 }
 
 int main(int argc, char *argv[]) {
-    int sockfd, n, proxycon = 0, forever = 0, spoof10 = 0;
+    int sockfd, n, proxycon = 0, forever = 0, spoof10 = 0, stdindone = 0;
     size_t portno, socksport, proto, socksproto, numcrs = 0, bytesread = 0;
     struct sockaddr_in serv_addr;
     struct hostent *server, *socksserver;
     fd_set fdset;
-    char hostname[256], sockshost[256], *buffer;
-    unsigned char read_buffer[BIG_STRING_SIZE];
-    unsigned char client_message[8192];
-    int read_size;
+    int read_size, tls12 = 0;
     int sent = 0, arg = 0, head_only = 0, with_headers = 0, upgrayedd = 0;
     char *path = NULL, *url = NULL, *proxyurl = NULL;
     struct TLSContext *context;
 #if defined(__BEOS__)
     struct timeval tv;
     int i, j;
+    /* BeOS has a fixed stack of 256K, which makes this real tight. */
+    unsigned char client_message[1024];
+    unsigned char read_buffer[1024];
+    char hostname[64], sockshost[64], *buffer;
+#else
+    char hostname[256], sockshost[256], *buffer;
+    unsigned char read_buffer[BIG_STRING_SIZE];
+    unsigned char client_message[8192];
 #endif
 
     proxyurl = getenv("ALL_PROXY");
@@ -235,6 +249,7 @@ int main(int argc, char *argv[]) {
         if (strchr(argv[arg], 't')) { forever = 1; }
         if (strchr(argv[arg], 'q')) { quiet = 1; }
         if (strchr(argv[arg], 'p')) { proxy = 1; }
+        if (strchr(argv[arg], '2')) { tls12 = 1; }
     }
 
     if (proxy) {
@@ -318,6 +333,7 @@ int main(int argc, char *argv[]) {
                 (void)sprintf(buffer,
                               "GET %s HTTP/1.0\r\n"
                               "Host: %s:%d\r\n"
+                              "User-Agent: carl\r\n"
                               "Connection: close\r\n"
                               "\r\n",
                 (strlen(path) ? path : "/"), hostname, portno);
@@ -325,6 +341,7 @@ int main(int argc, char *argv[]) {
                 (void)sprintf(buffer,
                               "GET %s HTTP/1.0\r\n"
                               "Host: %s\r\n"
+                              "User-Agent: carl\r\n"
                               "Connection: close\r\n"
                               "\r\n",
                 (strlen(path) ? path : "/"), hostname);
@@ -343,7 +360,7 @@ int main(int argc, char *argv[]) {
                 if (!read(STDIN_FILENO, &c, 1))
                     return 1; /* underflow */
                 read_buffer[read_size++] = c;
-                if (read_size == BIG_STRING_SIZE) return 1; /* overflow */
+                if (read_size == sizeof(read_buffer)) return 1; /* overflow */
 
                 if (c == '\n') {
                     if (++numcrs == 2) break; else continue;
@@ -432,6 +449,7 @@ int main(int argc, char *argv[]) {
             (void)sprintf(buffer,
 "%s %s HTTP/1.0\r\n"
 "Host: %s:%d\r\n"
+"User-Agent: carl\r\n"
 "Connection: close\r\n"
 "\r\n",
             (head_only ? "HEAD" : "GET"), (strlen(path) ? path : "/"),
@@ -440,6 +458,7 @@ int main(int argc, char *argv[]) {
             (void)sprintf(buffer,
 "%s %s HTTP/1.0\r\n"
 "Host: %s\r\n"
+"User-Agent: carl\r\n"
 "Connection: close\r\n"
 "\r\n",
             (head_only ? "HEAD" : "GET"), (strlen(path) ? path : "/"),
@@ -540,7 +559,13 @@ int main(int argc, char *argv[]) {
     /* set up http or tls */
 
     if (proto == 443) {
+#if defined(__BEOS__)
+#warning BeOS port currently limited to TLS 1.2
+        /* the stack overhead is apparently too much for it */
         context = tls_create_context(0, TLS_V12);
+#else
+        context = tls_create_context(0, (tls12) ? TLS_V12 : TLS_V13);
+#endif
         if (!tls_sni_set(context, hostname)) error("TLS context failure", 255);
         tls_client_connect(context);
         https_send_pending(sockfd, context);
@@ -573,19 +598,18 @@ int main(int argc, char *argv[]) {
 #if !defined(__BEOS__)
             FD_SET(STDIN_FILENO, &fdset);
             (void)select(sockfd + 1, &fdset, NULL, NULL, NULL); /* wait */
-
-            /* send any post-headers data, like POST forms, etc. */
-            if (FD_ISSET(STDIN_FILENO, &fdset)) {
 #else
             /* In BeOS and Win32 select() only works on sockets, not on
                standard file handles, so we must ping-pong. */
             tv.tv_sec = 0;
             tv.tv_usec = TIMESLICE;
             (void)select(sockfd + 1, &fdset, NULL, NULL, &tv); /* wait */
-            if (stdin_pending()) {
 #endif
+
+            /* send any post-headers data, like POST forms, etc. */
+            if (stdin_pending()) {
                 size_t buffer_index = 0;
-                read_size = read(STDIN_FILENO, read_buffer, BIG_STRING_SIZE);
+                read_size = read(STDIN_FILENO, read_buffer, sizeof(read_buffer));
 
                 while (read_size) {
                     int res = send(sockfd, (char *)&read_buffer[buffer_index],
@@ -637,6 +661,13 @@ int main(int argc, char *argv[]) {
         }
     } else if (proto == 443) {
         for(;;) {
+            int i;
+
+#if defined(__MACHTEN__)
+            /* it seems to get stuck here without this */
+            fprintf(stderr, "");
+#endif
+
             if (!forever) (void)alarm(10);
             FD_ZERO(&fdset);
             FD_SET(sockfd, &fdset);
@@ -669,59 +700,90 @@ int main(int argc, char *argv[]) {
                         https_send_pending(sockfd, context);
                         sent = 1;
                     }
-                    while (read_size = tls_read(context, read_buffer, BIG_STRING_SIZE - 1)) {
-                        bytesread += read_size;
-                        if (!with_headers) {
-                            size_t i = 0;
 
-                            for(i=0; i<read_size; i++) {
-                                if (read_buffer[i] == '\r') continue;
-                                if (read_buffer[i] == '\n') numcrs++;
-                                    else numcrs = 0;
-                                if (numcrs == 2) { break; }
-                            }
-                            if (numcrs < 2) continue;
-                            with_headers = 1; spoof10 = 0; /* paranoia */
-                            for(i++; i<read_size; i++) 
-                                fwrite(&(read_buffer[i]), 1, 1, stdout);
-                        } else {
-                            if (spoof10) {
-                                if (read_size > 7 &&
-                                        read_buffer[0] == 'H' &&
-                                        read_buffer[1] == 'T' &&
-                                        read_buffer[2] == 'T' &&
-                                        read_buffer[3] == 'P' &&
-                                        read_buffer[4] == '/' &&
-                                        read_buffer[5] == '1' &&
-                                        read_buffer[6] == '.' &&
-                                        read_buffer[7] == '1') {
-                                    read_buffer[7] = '0';
-                                    spoof10 = 0;
+                    /* prioritize POST data yet to be sent */
+#if defined(__BEOS__)
+                    if (stdindone) /* can't reliably detect stdin waiting */
+#else
+                    if (!stdin_pending() || stdindone)
+#endif
+                    /* drain everything waiting on the socket */
+                    for(;;) {
+                        /* drain TLS buffer first, in case we got it all */
+                        while (read_size = tls_read(context, read_buffer, sizeof(read_buffer))) {
+                            bytesread += read_size;
+                            if (!with_headers) {
+                                for(i=0; i<read_size; i++) {
+                                    if (read_buffer[i] == '\r') continue;
+                                    if (read_buffer[i] == '\n') numcrs++;
+                                        else numcrs = 0;
+                                    if (numcrs == 2) { break; }
                                 }
+                                if (numcrs < 2) continue;
+                                with_headers = 1; spoof10 = 0; /* paranoia */
+#if defined(__BEOS__)
+                                /* whyyyyyy */
+                                for(i++; i<read_size; i++)
+                                    write(STDOUT_FILENO, &(read_buffer[i]), 1);
+#else
+                                for(i++; i<read_size; i++)
+                                    fwrite(&(read_buffer[i]), 1, 1, stdout);
+#endif
+                            } else {
+                                if (spoof10) {
+                                    if (read_size > 7 &&
+                                            read_buffer[0] == 'H' &&
+                                            read_buffer[1] == 'T' &&
+                                            read_buffer[2] == 'T' &&
+                                            read_buffer[3] == 'P' &&
+                                            read_buffer[4] == '/' &&
+                                            read_buffer[5] == '1' &&
+                                            read_buffer[6] == '.' &&
+                                            read_buffer[7] == '1') {
+                                        read_buffer[7] = '0';
+                                        spoof10 = 0;
+                                    }
+                                }
+#if defined(__BEOS__)
+                                /* whyyyyyyy II: the wrath of wtf */
+                                for(i=0; i<read_size; i++)
+                                    write(STDOUT_FILENO, &(read_buffer[i]), 1);
+#else
+                                fwrite(read_buffer, read_size, 1, stdout);
+#endif
                             }
-                            fwrite(read_buffer, read_size, 1, stdout);
+                        }
+                        /* go back for more */
+                        if ((read_size = recv(sockfd, client_message, sizeof(client_message) , 0)) <= 0) break;
+                        i = tls_consume_stream(context, client_message, read_size, validate_certificate);
+                        if (i < 0) {
+                            if (errno > 0) perror("tls_consume_stream");
+                            if (!quiet) fprintf(stderr, "fatal TLS error: %d\n", i);
+                            return 6;
                         }
                     }
                 } else break; /* ready socket, no bytes: connection closed */
             }
 
             /* send any post-headers data, like POST forms, etc. */
-#if !defined(__BEOS__)
-            if (FD_ISSET(STDIN_FILENO, &fdset) && sent) {
-#else
+            if (sent) stdindone = 1; /* default done when request sent */
             if (stdin_pending() && sent) {
-#endif
-                size_t buffer_index = 0;
-
                 /* no point until TLS is established */
                 if (!tls_established(context)) continue;
 
-                read_size = read(STDIN_FILENO, read_buffer, BIG_STRING_SIZE);
-                tls_write(context, (unsigned char *)read_buffer, read_size);
-                https_send_pending(sockfd, context);
+                read_size = read(STDIN_FILENO, read_buffer, sizeof(read_buffer));
+                if (read_size > 0) {
+                    tls_write(context, (unsigned char *)read_buffer, read_size);
+                    https_send_pending(sockfd, context);
+                    stdindone = 0; /* prioritize STDIN on future selects */
+                }
             }
         }
     } else { /* profit! */ }
+
+#if DEBUG
+fprintf(stderr, "proper exit, bytes left=%d\n", context->application_buffer_len);
+#endif
 
     if (!bytesread) {
         if (proto == 443 && context->error_code) {

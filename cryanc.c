@@ -1,4 +1,4 @@
-/* Crypto Ancienne
+/* Crypto Ancienne v2.0
    A pre-C99 cryptography library for the Internet of Old Things
 
    DISCLAIMER:
@@ -7,10 +7,11 @@
    make that possible. Its functionality and security should be regarded as,
    at best, "good enough to shoot yourself in the foot with."
 
-   Copyright (c) 2020-1 Cameron Kaiser and contributors. All rights reserved.
+   Copyright (c) 2020-3 Cameron Kaiser and contributors. All rights reserved.
 
-   Based on TLSe. Copyright (c) 2016-2020-1, Eduard Suica.
+   Based on TLSe. Copyright (c) 2016-2021, Eduard Suica.
    Based on libtomcrypt. By Tom St Denis and contributors. Unlicense.
+   Based on public domain works by D. J. Bernstein.
    Allegedly includes an alleged ARC4 random routine from OpenBSD (allegedly).
    Copyright (c) 1996 David Mazieres.
    All rights reserved.
@@ -19,7 +20,7 @@
 */
 
 /********************************************************************************
- Copyright (c) 2016-2020, Eduard Suica
+ Copyright (c) 2016-2021, Eduard Suica
  All rights reserved.
  
  Redistribution and use in source and binary forms, with or without modification,
@@ -115,20 +116,35 @@
 
 /* BeOS R5 (BeBox or GTFO) */
 #if defined(__BEOS__)
-#warning compiling for BeOS R5 - MOSTLY WORKING, see notes
-#if defined(__MWERKS__)
-#warning Metrowerks compiler detected - maximum optimization -O2
+#warning compiling for BeOS R5 - PARTIALLY WORKING, see notes
 /* mostly POSIX but not SUS */
 #define NOT_POSIX 1
 #include <stdarg.h>
 #include <inttypes.h>
 #include <endian.h>
-/* Mwerks enforces a 32K function-local data limit which some functions hit */
-#define BIG_STRING_SIZE 0x1FFF
+#if __POWERPC__
+#ifndef __BIG_ENDIAN__
+#define __BIG_ENDIAN__ 1
+#endif
+#endif
 /* pad libc */
 #define usleep(x) snooze(x)
+#if defined(__MWERKS__)
+#warning Metrowerks compiler detected - DISABLE OPTIMIZATION
+/* Mwerks enforces a 32K function-local data limit which some functions hit,
+   which is made worse by BeOS's pathetic 256K stack limit per thread. */
+#define BIG_STRING_SIZE 0x0800
 #else
+#ifdef __GNUC__
+#if __POWERPC__
+#warning Fred Fish egcs detected - check your include paths are correct
+#else
+#warning Intel gcc - not supported
+#endif
+#else
+/* huh? */
 #warning this compiler is not supported
+#endif
 #endif
 #endif
 
@@ -183,8 +199,11 @@ typedef unsigned long long u_int64_t;
 /* mostly POSIX but not SUS */
 #define NOT_POSIX 1
 #define __WCHAR_TYPE__ 1 /* seems to already have it */
-#define NO_FUNNY_ALIGNMENT 1 /* what a surprise, Alpha hates unaligned ptrs */
-/* still, we must have missed some somewhere ... */
+/* big surprise, Alpha hates unaligned pointers. yeah, you were shocked.
+ * however, NO_FUNNY_ALIGNMENT assumes big endian and Alpha is little
+ * (mostly the uint64_t stuff). since it's slower and we require -misalign
+ * anyway due to other alignment issues, don't bother with it. */
+/* #define NO_FUNNY_ALIGNMENT 1 */
 #include <stdarg.h>
 #include <inttypes.h>
 #else
@@ -256,22 +275,81 @@ typedef unsigned long long u_int64_t;
 #endif
 #endif
 
+/* AmigaOS with ADE gcc 2.95.3 and ixemul */
+#if defined(__amiga__) || defined(__AMIGA__)
+#warning compiling for AmigaOS
+#if !defined(__ixemul)
+#error currently requires ixemul for proper POSIX semantics
+#error send your patch to fix this - you can help
+#endif
+#if !defined(__GNUC__)
+#warning non-gcc compiler detected, unsupported
+#endif
+#if !defined(__mc68000__) && !defined(__mc68000) && !defined(mc68000)
+#warning not a 68K target, assuming native PowerPC, unsupported
+#endif
+#define NOT_POSIX 1
+#include <stdarg.h>
+#include <unistd.h>
+#ifndef __BIG_ENDIAN__
+#define __BIG_ENDIAN__ 1
+#endif
+#endif
+
 /*****************************************************************************
- End of architecture-dependent recipes
+ End of architecture-dependent recipes (mostly)
  ****************************************************************************/
 #ifndef BIG_STRING_SIZE
 #define BIG_STRING_SIZE 0xFFFF
 #endif
 
+/* We use __BIG_ENDIAN__ as a canonical macro, so flatten any variant defs. */
+#ifndef __BIG_ENDIAN__
+#if defined(__BYTE_ORDER) && defined(__BIG_ENDIAN)
+#if (__BYTE_ORDER == __BIG_ENDIAN)
+#define __BIG_ENDIAN__ 1
+#endif
+#endif
+#endif
+
+#ifndef __BIG_ENDIAN__
+#if defined(BYTE_ORDER) && defined(BIG_ENDIAN)
+#if (BYTE_ORDER == BIG_ENDIAN)
+#define __BIG_ENDIAN__ 1
+#endif
+#endif
+#endif
+
+#if __BIG_ENDIAN__
+#warning big endian platform
+#else
+#warning little or middle endian platform
+#endif
+
 #ifdef NO_FUNNY_ALIGNMENT
-/* This essentially assumes big-endian, since this is largely an issue
-   only for old-sk00l RISC. See other places in this file. */
+/* These are inherently big endian, since they replace htons()/ntohs(). */
 #define __toshort(w,x) ((w[(x)] << 8) + (w[(x)+1]))
 void __short(void *where, unsigned int index, unsigned short value) {
 	char *p = (char *)where;
 	p[index] = value >> 8;
 	p[index+1] = (value & 0xff);
 }
+#if __BIG_ENDIAN__
+/* Just memcpy() the long long dudes */
+#else
+/* Convert native long long to big endian. */
+void __llong(void *where, uint64_t value) {
+	char *p = (char *)where;
+	p[7] = value & 0xff;
+	p[6] = value >> 8;
+	p[5] = value >> 16;
+	p[4] = value >> 24;
+	p[3] = value >> 32;
+	p[2] = value >> 40;
+	p[1] = value >> 48;
+	p[0] = value >> 56;
+}
+#endif
 #endif
 
 /* Default: assume POSIX-SUS (current Linux and BSDs, etc.) */
@@ -28033,7 +28111,7 @@ int pkcs_1_os2ip(void *n, unsigned char *in, unsigned long inlen) {
    @param  msghashlen      The length of the hash (octets)
    @param  sig             The signature data (encoded data)
    @param  siglen          The length of the signature data (octets)
-   @param  saltlen         The length of the salt used (octets)
+   @param  saltlen         The length of the salt used (octets) (0==auto)
    @param  hash_idx        The index of the hash desired
    @param  modulus_bitlen  The bit length of the RSA modulus
    @param  res             [out] The result of the comparison, 1==valid, 0==invalid
@@ -28043,7 +28121,7 @@ int pkcs_1_pss_decode(const unsigned char *msghash, unsigned long msghashlen,
                       const unsigned char *sig, unsigned long siglen,
                       unsigned long saltlen, int hash_idx,
                       unsigned long modulus_bitlen, int *res) {
-    unsigned char *DB, *mask, *salt, *hash;
+    unsigned char *DB, *mask, *salt, *hash, *saltpos;
     unsigned long x, y, hLen, modulus_len;
     int           err;
     hash_state    md;
@@ -28060,11 +28138,12 @@ int pkcs_1_pss_decode(const unsigned char *msghash, unsigned long msghashlen,
     }
 
     hLen        = hash_descriptor[hash_idx].hashsize;
+    modulus_bitlen--;
     modulus_len = (modulus_bitlen >> 3) + (modulus_bitlen & 7 ? 1 : 0);
 
     /* check sizes */
     if ((saltlen > modulus_len) ||
-        (modulus_len < hLen + saltlen + 2) || (siglen != modulus_len)) {
+        (modulus_len < hLen + saltlen + 2)) {
         return CRYPT_PK_INVALID_SIZE;
     }
 
@@ -28102,10 +28181,10 @@ int pkcs_1_pss_decode(const unsigned char *msghash, unsigned long msghashlen,
 
     /* copy out the hash */
     XMEMCPY(hash, sig + x, hLen);
-    x += hLen;
+    /* x += hLen; */
 
     /* check the MSB */
-    if ((sig[0] & ~(0xFF >> ((modulus_len << 3) - (modulus_bitlen - 1)))) != 0) {
+    if ((sig[0] & ~(0xFF >> ((modulus_len << 3) - (modulus_bitlen)))) != 0) {
         err = CRYPT_INVALID_PACKET;
         goto LBL_ERR;
     }
@@ -28121,22 +28200,43 @@ int pkcs_1_pss_decode(const unsigned char *msghash, unsigned long msghashlen,
     }
 
     /* now clear the first byte [make sure smaller than modulus] */
-    DB[0] &= 0xFF >> ((modulus_len << 3) - (modulus_bitlen - 1));
+    DB[0] &= 0xFF >> ((modulus_len << 3) - (modulus_bitlen));
 
     /* DB = PS || 0x01 || salt, PS == modulus_len - saltlen - hLen - 2 zero bytes */
 
-    /* check for zeroes and 0x01 */
-    for (x = 0; x < modulus_len - saltlen - hLen - 2; x++) {
-        if (DB[x] != 0x00) {
+    /* CK: if saltlen is 0, then we need to find the salt length ourselves */
+    if (saltlen == 0) {
+        for(saltlen = modulus_len - (hLen + 2); saltlen >= 0; saltlen--) {
+            switch (DB[modulus_len - hLen - saltlen - 2]) {
+                case 1: goto END_SALT;
+                case 0: continue;
+                default:
+                    err = CRYPT_INVALID_PACKET;
+                    goto LBL_ERR;
+            }
+        }
+        END_SALT: if (saltlen < 0) {
             err = CRYPT_INVALID_PACKET;
             goto LBL_ERR;
         }
-    }
 
-    /* check for the 0x01 */
-    if (DB[x++] != 0x01) {
-        err = CRYPT_INVALID_PACKET;
-        goto LBL_ERR;
+        saltpos = DB + (modulus_len - hLen - 1 - saltlen);
+    } else {
+        /* check for zeroes and 0x01 */
+        for (x = 0; x < modulus_len - saltlen - hLen - 2; x++) {
+            if (DB[x] != 0x00) {
+                err = CRYPT_INVALID_PACKET;
+                goto LBL_ERR;
+            }
+        }
+
+        /* check for the 0x01 */
+        if (DB[x++] != 0x01) {
+            err = CRYPT_INVALID_PACKET;
+            goto LBL_ERR;
+        }
+
+        saltpos = DB + x;
     }
 
     /* M = (eight) 0x00 || msghash || salt, mask = H(M) */
@@ -28150,7 +28250,7 @@ int pkcs_1_pss_decode(const unsigned char *msghash, unsigned long msghashlen,
     if ((err = hash_descriptor[hash_idx].process(&md, msghash, msghashlen)) != CRYPT_OK) {
         goto LBL_ERR;
     }
-    if ((err = hash_descriptor[hash_idx].process(&md, DB + x, saltlen)) != CRYPT_OK) {
+    if ((err = hash_descriptor[hash_idx].process(&md, saltpos, saltlen)) != CRYPT_OK) {
         goto LBL_ERR;
     }
     if ((err = hash_descriptor[hash_idx].done(&md, mask)) != CRYPT_OK) {
@@ -29802,7 +29902,11 @@ int rsa_verify_hash_ex(const unsigned char *sig, unsigned long siglen,
 
     if (padding == LTC_LTC_PKCS_1_PSS) {
         /* PSS decode and verify it */
-        err = pkcs_1_pss_decode(hash, hashlen, tmpbuf, x, saltlen, hash_idx, modulus_bitlen, stat);
+        if(modulus_bitlen%8 == 1){
+            err = pkcs_1_pss_decode(hash, hashlen, tmpbuf+1, x-1, saltlen, hash_idx, modulus_bitlen, stat);
+        } else {
+            err = pkcs_1_pss_decode(hash, hashlen, tmpbuf, x, saltlen, hash_idx, modulus_bitlen, stat);
+        }
     } else {
         /* LTC_PKCS #1 v1.5 decode it */
         unsigned char *out;
@@ -36183,6 +36287,14 @@ typedef struct chacha_ctx chacha_ctx;
 #define ROTL32(v, n) \
   (U32V((v) << (n)) | ((v) >> (32 - (n))))
 
+#if __BIG_ENDIAN__
+#define _private_tls_U8TO32_BIG(p) \
+  (((u32)((p)[3])) | \
+   ((u32)((p)[2]) <<  8) | \
+   ((u32)((p)[1]) << 16) | \
+   ((u32)((p)[0]) << 24))
+#endif
+
 #define _private_tls_U8TO32_LITTLE(p) \
   (((u32)((p)[0])) | \
    ((u32)((p)[1]) <<  8) | \
@@ -36228,10 +36340,24 @@ static inline void chacha_keysetup(chacha_ctx *x, const u8 *k, u32 kbits) {
     x->input[9] = _private_tls_U8TO32_LITTLE(k + 4);
     x->input[10] = _private_tls_U8TO32_LITTLE(k + 8);
     x->input[11] = _private_tls_U8TO32_LITTLE(k + 12);
+#if __BIG_ENDIAN__
+    if (kbits == 256) {
+        x->input[0] = 0x61707865; /* apxe */
+        x->input[1] = 0x3320646e; /* 3 dn */
+        x->input[2] = 0x79622d32; /* yb-2 */
+        x->input[3] = 0x6b206574; /* k et */
+    } else {
+        x->input[0] = 0x61707865; /* apxe */
+        x->input[1] = 0x3120646e; /* 1 dn */
+        x->input[2] = 0x79622d36; /* yb-6 */
+        x->input[3] = 0x6b206574; /* k et */
+    }
+#else
     x->input[0] = _private_tls_U8TO32_LITTLE(constants + 0);
     x->input[1] = _private_tls_U8TO32_LITTLE(constants + 4);
     x->input[2] = _private_tls_U8TO32_LITTLE(constants + 8);
     x->input[3] = _private_tls_U8TO32_LITTLE(constants + 12);
+#endif
 }
 
 static inline void chacha_key(chacha_ctx *x, u8 *k) {
@@ -36253,8 +36379,14 @@ static inline void chacha_nonce(chacha_ctx *x, u8 *nonce) {
 }
 
 static inline void chacha_ivsetup(chacha_ctx *x, const u8 *iv, const u8 *counter) {
+#if __BIG_ENDIAN__
+    /* incoming int is native endian */
+    x->input[12] = counter == NULL ? 0 : _private_tls_U8TO32_BIG(counter + 0);
+    x->input[13] = counter == NULL ? 0 : _private_tls_U8TO32_BIG(counter + 4);
+#else
     x->input[12] = counter == NULL ? 0 : _private_tls_U8TO32_LITTLE(counter + 0);
     x->input[13] = counter == NULL ? 0 : _private_tls_U8TO32_LITTLE(counter + 4);
+#endif
     if (iv) {
         x->input[14] = _private_tls_U8TO32_LITTLE(iv + 0);
         x->input[15] = _private_tls_U8TO32_LITTLE(iv + 4);
@@ -36262,7 +36394,11 @@ static inline void chacha_ivsetup(chacha_ctx *x, const u8 *iv, const u8 *counter
 }
 
 static inline void chacha_ivsetup_96bitnonce(chacha_ctx *x, const u8 *iv, const u8 *counter) {
+#if __BIG_ENDIAN__
+    x->input[12] = counter == NULL ? 0 : _private_tls_U8TO32_BIG(counter + 0);
+#else
     x->input[12] = counter == NULL ? 0 : _private_tls_U8TO32_LITTLE(counter + 0);
+#endif
     if (iv) {
         x->input[13] = _private_tls_U8TO32_LITTLE(iv + 0);
         x->input[14] = _private_tls_U8TO32_LITTLE(iv + 4);
@@ -36271,7 +36407,11 @@ static inline void chacha_ivsetup_96bitnonce(chacha_ctx *x, const u8 *iv, const 
 }
 
 static inline void chacha_ivupdate(chacha_ctx *x, const u8 *iv, const u8 *aad, const u8 *counter) {
+#if __BIG_ENDIAN__
+    x->input[12] = counter == NULL ? 0 : _private_tls_U8TO32_BIG(counter + 0);
+#else
     x->input[12] = counter == NULL ? 0 : _private_tls_U8TO32_LITTLE(counter + 0);
+#endif
     x->input[13] = _private_tls_U8TO32_LITTLE(iv + 0);
     x->input[14] = _private_tls_U8TO32_LITTLE(iv + 4) ^ _private_tls_U8TO32_LITTLE(aad);
     x->input[15] = _private_tls_U8TO32_LITTLE(iv + 8) ^ _private_tls_U8TO32_LITTLE(aad + 4);
@@ -36808,7 +36948,8 @@ typedef enum {
     anonymous = 0,
     rsa = 1,
     dsa = 2,
-    ecdsa = 3
+    ecdsa = 3,
+    pss_rsae = 8
 } TLSSignatureAlgorithm;
 
 struct _private_OID_chain {
@@ -37629,7 +37770,7 @@ int _private_rsa_verify_hash_md5sha1(const unsigned char *sig, unsigned long sig
 }
 #endif
 
-int _private_tls_verify_rsa(struct TLSContext *context, unsigned int hash_type, const unsigned char *buffer, unsigned int len, const unsigned char *message, unsigned int message_len) {
+int _private_tls_verify_rsa(struct TLSContext *context, unsigned int hash_type, const unsigned char *buffer, unsigned int len, const unsigned char *message, unsigned int message_len, int force_pss) {
     rsa_key key;
     int err;
     int hash_idx = -1;
@@ -37746,7 +37887,7 @@ int _private_tls_verify_rsa(struct TLSContext *context, unsigned int hash_type, 
     else
 #endif
 #ifdef WITH_TLS_13
-    if ((context->version == TLS_V13) || (context->version == DTLS_V13))
+    if (((context->version == TLS_V13) || (context->version == DTLS_V13)) || force_pss)
         err = rsa_verify_hash_ex(buffer, len, hash, hash_len, LTC_PKCS_1_PSS, hash_idx, 0, &rsa_stat, &key);
     else
 #endif
@@ -39905,24 +40046,49 @@ void tls_packet_update(struct TLSPacket *packet) {
                                 aad[0] = TLS_APPLICATION_DATA;
                                 aad[1] = packet->buf[1];
                                 aad[2] = packet->buf[2];
+#if NO_FUNNY_ALIGNMENT
+#ifdef TLS_WITH_CHACHA20_POLY1305
+                                if (packet->context->crypto.created == 3)
+                                    __short(aad, 3, packet->len + POLY1305_TAGLEN - header_size);
+                                else
+#endif
+                                    __short(aad, 3, packet->len + TLS_GCM_TAG_LEN - header_size);
+#else
 #ifdef TLS_WITH_CHACHA20_POLY1305
                                 if (packet->context->crypto.created == 3)
                                     *((unsigned short *)(aad + 3)) = htons(packet->len + POLY1305_TAGLEN - header_size);
                                 else
 #endif
                                     *((unsigned short *)(aad + 3)) = htons(packet->len + TLS_GCM_TAG_LEN - header_size);
+#endif
                                 aad_size = 5;
                                 sequence = aad + 5;
                                 if (packet->context->dtls)
                                     *((uint64_t *)sequence) = *(uint64_t *)&packet->buf[3];
                                 else
+#if NO_FUNNY_ALIGNMENT
+#if __BIG_ENDIAN__
+                                    memcpy((void *)sequence, (void *)&packet->context->local_sequence_number, sizeof(uint64_t));
+#else
+                                    __llong((void *)sequence, packet->context->local_sequence_number);
+#endif
+#else
                                     *((uint64_t *)sequence) = htonll(packet->context->local_sequence_number);
+#endif
                             } else {
 #endif
                                 if (packet->context->dtls)
                                     *((uint64_t *)aad) = *(uint64_t *)&packet->buf[3];
                                 else
+#if NO_FUNNY_ALIGNMENT
+#if __BIG_ENDIAN__
+                                    memcpy((void *)aad, (void *)&packet->context->local_sequence_number, sizeof(uint64_t));
+#else
+                                    __llong((void *)aad, packet->context->local_sequence_number);
+#endif
+#else
                                     *((uint64_t *)aad) = htonll(packet->context->local_sequence_number);
+#endif
                                 aad[8] = packet->buf[0];
                                 aad[9] = packet->buf[1];
                                 aad[10] = packet->buf[2];
@@ -39977,7 +40143,11 @@ void tls_packet_update(struct TLSPacket *packet) {
 #ifdef WITH_TLS_13
                             if ((packet->context->version == TLS_V13) || (packet->context->version == DTLS_V13)) {
                                 ct[0] = TLS_APPLICATION_DATA;
+#if NO_FUNNY_ALIGNMENT
+                                __short(ct, 1, (packet->context->version == TLS_V13 ? TLS_V12 : DTLS_V12));
+#else
                                 *(unsigned short *)&ct[1] = htons(packet->context->version == TLS_V13 ? TLS_V12 : DTLS_V12);
+#endif
                                 /* is dtls? */
                                 if (header_size != 5)
                                     memcpy(ct, packet->buf + 3, header_size - 2);
@@ -41920,7 +42090,7 @@ struct TLSPacket *tls_build_hello(struct TLSContext *context, int tls13_downgrad
                     extension_len += 70;
 #else
                     /* secp256r1 produces 65 bytes export */
-                    extension_len += 103;
+                    extension_len += 109;
 #endif
                 }
 #endif
@@ -41974,8 +42144,8 @@ struct TLSPacket *tls_build_hello(struct TLSContext *context, int tls13_downgrad
                 tls_packet_uint16(packet, secp521r1.iana);
 #endif
 
-                /* CK: add EC point formats for TLS 1.2 */
-                if ((context->version == TLS_V12) || (context->version == DTLS_V12)) {
+                /* CK: add EC point formats for TLS 1.2 and 1.3 */
+                if ((context->version == TLS_V12) || (context->version == DTLS_V12) || (context->version == TLS_V13) || (context->version == DTLS_V13)) {
                     tls_packet_uint16(packet, 0x000b);
                     tls_packet_uint16(packet, 0x0002);
                     tls_packet_uint8 (packet,   0x01);
@@ -42365,6 +42535,15 @@ int _private_tls_parse_key_share(struct TLSContext *context, const unsigned char
     unsigned short key_size = 0;
 
     while (buf_len >= 4) {
+#if NO_FUNNY_ALIGNMENT
+        unsigned short named_group = __toshort(buf, i);
+        i += 2;
+        buf_len -= 2;
+
+        key_size = __toshort(buf, i);
+        i += 2;
+        buf_len -= 2;
+#else
         unsigned short named_group = ntohs(*(unsigned short *)&buf[i]);
         i += 2;
         buf_len -= 2;
@@ -42372,6 +42551,7 @@ int _private_tls_parse_key_share(struct TLSContext *context, const unsigned char
         key_size = ntohs(*(unsigned short *)&buf[i]);
         i += 2;
         buf_len -= 2;
+#endif
 
         if (key_size > buf_len)
             return TLS_BROKEN_PACKET;
@@ -42531,7 +42711,7 @@ int _private_tls_parse_key_share(struct TLSContext *context, const unsigned char
         context->premaster_key_len = out_size;
         return 0;
     } else
-    if (dhkey) {
+    if ((dhkey) && (buffer)) {
         unsigned int dhe_out_size;
 
         _private_tls_dhe_create(context);
@@ -42871,13 +43051,12 @@ int tls_parse_hello(struct TLSContext *context, const unsigned char *buf, int bu
             if (extension_type == 0x2B) {
                 /* supported versions */
                 if ((context->is_server) && (buf[res] == extension_len - 1)) {
-                    if (extension_len > 4) {
+                    if (extension_len > 2) {
                         int i;
                         int limit = (int)buf[res];
 
                         DEBUG_DUMP_HEX_LABEL("SUPPORTED VERSIONS", &buf[res], extension_len);
                         if (limit == extension_len - 1) {
-                            limit--;
                             for (i = 1; i < limit; i += 2) {
                                 if ((ntohs(*(unsigned short *)&buf[res + i]) == TLS_V13) || (ntohs(*(unsigned short *)&buf[res + i]) == 0x7F1C)) {
                                     context->version = TLS_V13;
@@ -42890,9 +43069,19 @@ int tls_parse_hello(struct TLSContext *context, const unsigned char *buf, int bu
                     }
                 } else
                 if ((!context->is_server) && (extension_len == 2)) {
-                    if ((ntohs(*(unsigned short *)&buf[res]) == TLS_V13) || (ntohs(*(unsigned short *)&buf[res]) == 0x7F1C)) {
+#if NO_FUNNY_ALIGNMENT
+                    if ((__toshort(buf, res) == TLS_V13) || (__toshort(buf, res) == 0x7F1C))
+#else
+                    if ((ntohs(*(unsigned short *)&buf[res]) == TLS_V13) || (ntohs(*(unsigned short *)&buf[res]) == 0x7F1C))
+#endif
+                    {
                         context->version = TLS_V13;
+#if NO_FUNNY_ALIGNMENT
+                        context->tls13_version = __toshort(buf, res);
+#else
                         context->tls13_version = ntohs(*(unsigned short *)&buf[res]);
+#endif
+
                         DEBUG_PRINT0("TLS 1.3 SUPPORTED\n");
                     }
                 }
@@ -43220,6 +43409,13 @@ const unsigned char *_private_tls_parse_signature(struct TLSContext *context, co
         *sign_algorithm = buf[res];
         res++;
     }
+
+    /* convert PSS signatures, which "swap" the hash and signing bytes */
+    if (*hash_algorithm == pss_rsae) {
+        /* we support 08 04,05,06 which are SHA256, 384, 512. */
+        *hash_algorithm = *sign_algorithm;
+        *sign_algorithm = pss_rsae;
+    }
 #if NO_FUNNY_ALIGNMENT
     size = __toshort(buf, res);
 #else
@@ -43227,7 +43423,7 @@ const unsigned char *_private_tls_parse_signature(struct TLSContext *context, co
 #endif
     res += 2;
     CHECK_SIZE(size, buf_len - res, NULL)
-    DEBUG_DUMP_HEX(&buf[res], size);
+    DEBUG_DUMP_HEX(&buf[res - 4], size);
     *sig_size = size;
     *offset = res + size;
     return &buf[res];
@@ -43383,8 +43579,15 @@ int tls_parse_server_key_exchange(struct TLSContext *context, const unsigned cha
             }
         } else 
 #endif
+        if (sign_algorithm == pss_rsae) {
+            if (_private_tls_verify_rsa(context, hash_algorithm, signature, sign_size, message, message_len, pss_rsae) != 1) {
+                DEBUG_PRINT0("PSS Server signature FAILED!\n");
+                TLS_FREE(message);
+                return TLS_BROKEN_PACKET;
+            }
+        } else
         {
-            if (_private_tls_verify_rsa(context, hash_algorithm, signature, sign_size, message, message_len) != 1) {
+            if (_private_tls_verify_rsa(context, hash_algorithm, signature, sign_size, message, message_len, 0) != 1) {
                 DEBUG_PRINT0("Server signature FAILED!\n");
                 TLS_FREE(message);
                 return TLS_BROKEN_PACKET;
@@ -43684,8 +43887,13 @@ int tls_parse_verify_tls13(struct TLSContext *context, const unsigned char *buf,
 
     signing_data_len += _private_tls_get_hash(context, signing_data + 98);
     DEBUG_DUMP_HEX_LABEL("signature data", signing_data, signing_data_len);
+#if NO_FUNNY_ALIGNMENT
+    signature = __toshort(buf, 3);
+    signature_size = __toshort(buf, 5);
+#else
     signature = ntohs(*(unsigned short *)&buf[3]);
     signature_size = ntohs(*(unsigned short *)&buf[5]);
+#endif
     CHECK_SIZE(7 + size, buf_len, TLS_NEED_MORE_DATA)
     switch (signature) {
 #ifdef TLS_ECDSA_SUPPORTED
@@ -43703,7 +43911,7 @@ int tls_parse_verify_tls13(struct TLSContext *context, const unsigned char *buf,
             break;
 #endif
         case 0x0804:
-            valid = _private_tls_verify_rsa(context, sha256, buf + 7, signature_size, signing_data, signing_data_len);
+            valid = _private_tls_verify_rsa(context, sha256, buf + 7, signature_size, signing_data, signing_data_len, 0); // ???
             break;
         default:
             DEBUG_PRINT1("Unsupported signature: %x\n", (int)signature);
@@ -43741,12 +43949,12 @@ int tls_parse_verify(struct TLSContext *context, const unsigned char *buf, int b
         DEBUG_PRINT3("ALGORITHM %i/%i (%i)\n", hash, algorithm, (int)size);
         DEBUG_DUMP_HEX_LABEL("VERIFY", &buf[7], bytes_to_follow - 7);
         
-        res = _private_tls_verify_rsa(context, hash, &buf[7], size, context->cached_handshake, context->cached_handshake_len);
+        res = _private_tls_verify_rsa(context, hash, &buf[7], size, context->cached_handshake, context->cached_handshake_len, 0);
     } else {
 #ifdef TLS_LEGACY_SUPPORT
         unsigned short size = ntohs(*(unsigned short *)&buf[3]);
         CHECK_SIZE(size, bytes_to_follow - 2, TLS_BAD_CERTIFICATE)
-        res = _private_tls_verify_rsa(context, md5, &buf[5], size, context->cached_handshake, context->cached_handshake_len);
+        res = _private_tls_verify_rsa(context, md5, &buf[5], size, context->cached_handshake, context->cached_handshake_len, 0);
 #endif
     }
     if (context->cached_handshake) {
@@ -44233,7 +44441,17 @@ int tls_parse_message(struct TLSContext *context, unsigned char *buf, int buf_le
     ptr = buf + buf_pos;
 
     CHECK_SIZE(buf_pos + length, buf_len, TLS_NEED_MORE_DATA)
-    DEBUG_PRINT2("Message type: %0x, length: %i\n", (int)type, (int)length);
+    DEBUG_PRINT2("Message type: 0x%0x, length: %i\n", (int)type, (int)length);
+#ifdef WITH_TLS_13
+    if ((context->version == TLS_V13) || (context->version == DTLS_V13)) {
+        if (type == TLS_APPLICATION_DATA && !(context->crypto.created) && !(context->is_server)) {
+            /* CK: possible to send wrapped records without a cipher change */
+            DEBUG_PRINT0("WRAPPED RECORD WITHOUT CIPHER CHANGE, FORCING KEY\n");
+            _private_tls13_key(context, 1);
+            context->cipher_spec_set = 1;
+        }
+    }
+#endif
     if ((context->cipher_spec_set) && (type != TLS_CHANGE_CIPHER)) {
         unsigned char aad[16];
         int aad_size, res0, res1, res2, res3;
@@ -44272,13 +44490,25 @@ int tls_parse_message(struct TLSContext *context, unsigned char *buf, int buf_le
                 aad[0] = TLS_APPLICATION_DATA;
                 aad[1] = 0x03;
                 aad[2] = 0x03;
+#if NO_FUNNY_ALIGNMENT
+                __short(aad, 3, buf_len - header_size);
+#else
                 *((unsigned short *)(aad + 3)) = htons(buf_len - header_size);
+#endif
                 aad_size = 5;
                 sequence = aad + 5;
                 if (context->dtls)
                     *((uint64_t *)sequence) = *(uint64_t *)(buf + 3);
                 else
+#if NO_FUNNY_ALIGNMENT
+#if __BIG_ENDIAN__
+                    memcpy((void *)sequence, (void *)&context->remote_sequence_number, sizeof(uint64_t));
+#else
+                    __llong((void *)sequence, context->remote_sequence_number);
+#endif
+#else
                     *((uint64_t *)sequence) = htonll(context->remote_sequence_number);
+#endif
                 memcpy(iv, context->crypto.ctx_remote_mac.remote_iv, TLS_13_AES_GCM_IV_LENGTH);
                 for (i = 0; i < 8; i++)
                     iv[offset + i] = context->crypto.ctx_remote_mac.remote_iv[offset + i] ^ sequence[i];
@@ -44292,7 +44522,15 @@ int tls_parse_message(struct TLSContext *context, unsigned char *buf, int buf_le
                 if (context->dtls)
                     *((uint64_t *)aad) = htonll(dtls_sequence_number);
                 else
+#if NO_FUNNY_ALIGNMENT
+#if __BIG_ENDIAN__
+                    memcpy((void *)aad, (void *)&context->remote_sequence_number, sizeof(uint64_t));
+#else
+                    __llong((void *)aad, context->remote_sequence_number);
+#endif
+#else
                     *((uint64_t *)aad) = htonll(context->remote_sequence_number);
+#endif
                 aad[8] = buf[0];
                 aad[9] = buf[1];
                 aad[10] = buf[2];
@@ -44365,23 +44603,47 @@ int tls_parse_message(struct TLSContext *context, unsigned char *buf, int buf_le
                 aad[0] = TLS_APPLICATION_DATA;
                 aad[1] = 0x03;
                 aad[2] = 0x03;
+#if NO_FUNNY_ALIGNMENT
+                __short(aad, 3, buf_len - header_size);
+#else
                 *((unsigned short *)(aad + 3)) = htons(buf_len - header_size);
+#endif
                 aad_size = 5;
                 sequence = aad + 5;
                 if (context->dtls)
                     *((uint64_t *)sequence) = *(uint64_t *)(buf + 3);
                 else
+#if NO_FUNNY_ALIGNMENT
+#if __BIG_ENDIAN__
+                    memcpy((void *)sequence, (void *)&context->remote_sequence_number, sizeof(uint64_t));
+#else
+                    __llong((void *)sequence, context->remote_sequence_number);
+#endif
+#else
                     *((uint64_t *)sequence) = htonll(context->remote_sequence_number);
+#endif
             } else {
 #endif
                 if (context->dtls)
                     *((uint64_t *)aad) = htonll(dtls_sequence_number);
                 else
+#if NO_FUNNY_ALIGNMENT
+#if __BIG_ENDIAN__
+                    memcpy((void *)aad, (void *)&context->remote_sequence_number, sizeof(uint64_t));
+#else
+                    __llong((void *)aad, context->remote_sequence_number);
+#endif
+#else
                     *((uint64_t *)aad) = htonll(context->remote_sequence_number);
+#endif
                 aad[8] = buf[0];
                 aad[9] = buf[1];
                 aad[10] = buf[2];
+#if NO_FUNNY_ALIGNMENT
+                __short(aad, 11, pt_length);
+#else
                 *((unsigned short *)(aad + 11)) = htons((unsigned short)pt_length);
+#endif
                 aad[13] = 0;
                 aad[14] = 0;
                 aad[15] = 0;
@@ -44408,9 +44670,20 @@ int tls_parse_message(struct TLSContext *context, unsigned char *buf, int buf_le
                 _private_tls_poly1305_update(&ctx, zeropad, 16 - rem);
             
             _private_tls_U32TO8(&trail[0], aad_size == 5 ? 5 : 13);
-            *(int *)&trail[4] = 0;
             _private_tls_U32TO8(&trail[8], pt_length);
+#if NO_FUNNY_ALIGNMENT
+            trail[4] = 0;
+            trail[5] = 0;
+            trail[6] = 0;
+            trail[7] = 0;
+            trail[12] = 0;
+            trail[13] = 0;
+            trail[14] = 0;
+            trail[15] = 0;
+#else
+            *(int *)&trail[4] = 0;
             *(int *)&trail[12] = 0;
+#endif
 
             _private_tls_poly1305_update(&ctx, trail, 16);
             _private_tls_poly1305_finish(&ctx, mac_tag);
@@ -44533,6 +44806,8 @@ int tls_parse_message(struct TLSContext *context, unsigned char *buf, int buf_le
         case TLS_APPLICATION_DATA:
             if (context->connection_status != 0xFF) {
                 DEBUG_PRINT0("UNEXPECTED APPLICATION DATA MESSAGE\n");
+                DEBUG_DUMP_HEX(ptr, length);
+                DEBUG_PRINT0("\n");
                 payload_res = TLS_UNEXPECTED_MESSAGE;
                 _private_tls_write_packet(tls_build_alert(context, 1, unexpected_message));
             } else {
