@@ -20,7 +20,7 @@
 */
 
 /********************************************************************************
- Copyright (c) 2016-2021, Eduard Suica
+ Copyright (c) 2016-2023, Eduard Suica
  All rights reserved.
  
  Redistribution and use in source and binary forms, with or without modification,
@@ -156,7 +156,7 @@
 #define NOT_POSIX 1
 #include <stdarg.h>
 #include <inttypes.h>
-#ifdef __sparc__
+#if (defined(__sparc) || defined(__sparc__))
 #define NO_FUNNY_ALIGNMENT 1
 #define __BIG_ENDIAN__ 1
 #endif
@@ -200,9 +200,8 @@ typedef unsigned long long u_int64_t;
 #define NOT_POSIX 1
 #define __WCHAR_TYPE__ 1 /* seems to already have it */
 /* big surprise, Alpha hates unaligned pointers. yeah, you were shocked.
- * however, NO_FUNNY_ALIGNMENT assumes big endian and Alpha is little
- * (mostly the uint64_t stuff). since it's slower and we require -misalign
- * anyway due to other alignment issues, don't bother with it. */
+   however, NO_FUNNY_ALIGNMENT is still not enough for it, so no point
+   in using it yet! */
 /* #define NO_FUNNY_ALIGNMENT 1 */
 #include <stdarg.h>
 #include <inttypes.h>
@@ -210,6 +209,58 @@ typedef unsigned long long u_int64_t;
 #warning unsupported configuration
 #endif
 #endif
+
+/* SCO Xenix and Unix 4.2 (pre-OpenServer)*/
+#if defined (M_XENIX) && !defined(_SCO_DS)
+
+#if !defined(M_UNIX) /* Xenix 2.3.4 */
+#warning compiling for SCO Xenix
+#include <stddef.h>
+
+/* Xenix's realloc is also weird */
+char *_crealloc(void *p, unsigned s) { return (p) ? realloc(p,s) : malloc(s); }
+#define TLS_REALLOC(p,s) _crealloc(p,s)
+#define XREALLOC _crealloc
+
+/*from https://www.samba.org/WinFS_report/winfs_dev/sun/solaris/source/2.50a/replace.c */ 
+char *strstr(char *s, char *p)
+{
+	int len = strlen(p);
+
+	while ( *s != '\0' ) {
+		if ( strncmp(s, p, len) == 0 )
+		return s;
+		s++;
+	}
+
+	return NULL;
+}
+
+#define memmove(d,s,l) (bcopy((char *)(s),(char *)(d),(l)))
+#else
+#warning compiling for SCO Unix
+#endif /* Xenix 2.3.4 */
+
+#define LTC_NO_PROTOTYPES
+#define NOT_POSIX 1
+#include <sys/types.h>
+#include <stdarg.h>
+
+int usleep(unsigned int useconds)
+{
+   struct timeval temptval;
+
+   if (useconds <= 0) return;
+   temptval.tv_sec = useconds / 1000000;
+   temptval.tv_usec = useconds % 1000000;
+   if (select(0,NULL,NULL,NULL,&temptval) == -1 && errno != 4)
+   {
+	  perror("sleep with select");
+	  exit(1);
+	}
+ }
+
+#endif /* SCO Xenix, Unix, ODT */
 
 /* Distinguish NeXTSTEP/OpenSTEP from Rhapsody and from Mac OS X */
 #if defined(__MACH__)
@@ -245,7 +296,8 @@ typedef unsigned long long u_int64_t;
 
 /* A/UX (might work with 2, tested on 3.1) */
 #if defined(__AUX__)
-#warning compiling for A/UX - remember to include -lbsd
+/* Needs BSD compat library for usleep. */
+#warning compiling for A/UX - remember to include -lbsd or /lib/libbsd.a
 #include <stdarg.h>
 /* Seems to lack the usual macros for endianness. */
 #ifndef __BIG_ENDIAN__
@@ -282,17 +334,59 @@ typedef unsigned long long u_int64_t;
 #error currently requires ixemul for proper POSIX semantics
 #error send your patch to fix this - you can help
 #endif
-#if !defined(__GNUC__)
-#warning non-gcc compiler detected, unsupported
-#endif
 #if !defined(__mc68000__) && !defined(__mc68000) && !defined(mc68000)
 #warning not a 68K target, assuming native PowerPC, unsupported
+#endif
+#if !defined(__GNUC__)
+#warning non-gcc compiler detected, unsupported
+#else
+#warning remember to use -mstackextend
 #endif
 #define NOT_POSIX 1
 #include <stdarg.h>
 #include <unistd.h>
 #ifndef __BIG_ENDIAN__
 #define __BIG_ENDIAN__ 1
+#endif
+/* Don't let the stack bloat */
+#define BIG_STRING_SIZE 0x1000
+#endif
+
+/* Mac OS with MrC (possibly also SC). This is REALLY BUGGY. */
+/* MrC doesn't understand #warning, so we turn off our helpful diagnostics. */
+#ifdef MPW_C
+#include <stdarg.h>
+#define NOT_POSIX 1
+#define __BIG_ENDIAN__ 1
+/* This works around issues with the compiler (PowerPC handles misaligned
+   accesses just fine). */
+#define NO_FUNNY_ALIGNMENT 1
+/* This makes it a bit more stable. Not sure what the optimum value is. */
+#define BIG_STRING_SIZE 0x0800
+#define inline
+/* ^ ... to nothing. These compilers don't understand this keyword, but they
+   automatically inline short functions. */
+#endif
+
+/* Architectures we will always break up aligned accesses on */
+#ifndef FUNNY_ALIGNMENT_OK
+#ifndef NO_FUNNY_ALIGNMENT
+#if (defined(mips) || defined(_mips) || defined(__mips) || defined(__mips__) || defined(_MIPS_) || defined(__MIPS__) || defined(__MIPSEL__) || defined(__MIPSEB__))
+#warning detected MIPS architecture, forcing aligned memory access
+#define NO_FUNNY_ALIGNMENT 1
+#endif
+#if (defined(__sparc) || defined(__sparc__))
+#warning detected SPARC architecture, forcing aligned memory access
+#define NO_FUNNY_ALIGNMENT 1
+#endif
+#if (defined(__hppa) || defined(__hppa__))
+#warning detected PA-RISC architecture, forcing aligned memory access
+#define NO_FUNNY_ALIGNMENT 1
+#endif
+#if (defined(__sh__))
+#warning detected SuperH architecture, forcing aligned memory access
+#define NO_FUNNY_ALIGNMENT 1
+#endif
 #endif
 #endif
 
@@ -321,7 +415,9 @@ typedef unsigned long long u_int64_t;
 #endif
 
 #if __BIG_ENDIAN__
+#ifndef MPW_C
 #warning big endian platform
+#endif
 #else
 #warning little or middle endian platform
 #endif
@@ -360,7 +456,9 @@ void __llong(void *where, uint64_t value) {
 #include <unistd.h>
 #include <stdarg.h>
 #else
+#ifndef MPW_C
 #warning compiling with compatibility stubs
+#endif
 
 /* Sys-dep work arounds for old headers */
 
@@ -16939,9 +17037,8 @@ int der_printable_value_decode(int v);
 /* UTF-8 */
  #if (defined(SIZE_MAX) || __STDC_VERSION__ >= 199901L || defined(WCHAR_MAX) || defined(_WCHAR_T) || defined(_WCHAR_T_DEFINED) || defined (__WCHAR_TYPE__)) && !defined(LTC_NO_WCHAR)
   #include <wchar.h>
- #else
-  /* Don't define on platforms that predefine it. */
- #if !defined(_WCHAR_H) && !defined(_STDDEF_H) && !defined(_STDDEF_H_) && !defined(_ANSI_STDDEF_H) && !defined(__WCHAR_TYPE__) && !defined(_WCHAR_T)
+ #else	  
+ #if  !defined(_WCHAR_H) && !defined(_STDDEF_H) && !defined(_STDDEF_H_) && !defined(_ANSI_STDDEF_H) && !defined(__WCHAR_TYPE__) && !defined(_WCHAR_T) && !defined(__WCHARTDEF__)
 typedef ulong32   wchar_t;
  #endif
  #endif
@@ -29410,6 +29507,11 @@ void rsa_free(rsa_key *key) {
    @return CRYPT_OK if successful, upon error allocated memory is freed
  */
 int rsa_import(const unsigned char *in, unsigned long inlen, rsa_key *key) {
+#ifdef __MRC__
+/* Disable optimizations for this function so MrC will compile it correctly. */
+#pragma options opt off
+#endif
+
     int           err;
     void          *zero;
     unsigned char *tmpbuf;
@@ -30525,6 +30627,11 @@ static int _sha256_compress(hash_state * md, unsigned char *buf)
 static int  sha256_compress(hash_state * md, unsigned char *buf)
 #endif
 {
+#ifdef __MRC__
+/* MrC hangs while optimizing the code for this function. */
+#pragma options opt off
+#endif
+
     ulong32 S[8], W[64], t0, t1;
 #ifdef LTC_SMALL_CODE
     ulong32 t;
@@ -31033,6 +31140,11 @@ static int _sha512_compress(hash_state * md, unsigned char *buf)
 static int  sha512_compress(hash_state * md, unsigned char *buf)
 #endif
 {
+#ifdef __MRC__
+/* MrC hangs while optimizing the code for this function. */
+#pragma options opt off
+#endif
+
     ulong64 S[8], W[80], t0, t1;
     int i;
 
@@ -31142,6 +31254,11 @@ HASH_PROCESS(sha512_process, sha512_compress, sha512, 128)
 */
 int sha512_done(hash_state * md, unsigned char *out)
 {
+#ifdef __MRC__
+/* Disable optimizations for this function so MrC will compile it correctly. */
+#pragma options opt off
+#endif
+
     int i;
 
     LTC_ARGCHK(md  != NULL);
@@ -33281,7 +33398,7 @@ int ECB_TEST(void)
 */
 void ECB_DONE(symmetric_key *skey)
 {
-  //LTC_UNUSED_PARAM(skey);
+  /* LTC_UNUSED_PARAM(skey); */
 }
 
 
@@ -33842,6 +33959,11 @@ int gcm_add_iv(gcm_state *gcm,
 int gcm_done(gcm_state *gcm, 
                      unsigned char *tag,    unsigned long *taglen)
 {
+#ifdef __MRC__
+/* Disable optimizations for this function so MrC will compile it correctly. */
+#pragma options opt off
+#endif
+
    unsigned long x;
    int err;
 
@@ -34040,6 +34162,11 @@ int gcm_process(gcm_state *gcm,
                      unsigned char *ct,
                      int direction)
 {
+#ifdef __MRC__
+/* Selectively enable optimization. */
+#pragma options opt local
+#endif
+
    unsigned long x;
    int           y, err;
    unsigned char b;
@@ -36110,7 +36237,7 @@ void curve25519(uint8_t *mypublic, const uint8_t *secret, const uint8_t *basepoi
 #define TLS_DHE_KEY_SIZE          2048
 
 #if(0)
-// you should never use weak DH groups (1024 bits)
+/* you should never use weak DH groups (1024 bits)
 // but if you have old devices (like grandstream ip phones)
 // that can't handle 2048bit DHE, uncomment next lines
 // and define TLS_WEAK_DH_LEGACY_DEVICES
@@ -36118,7 +36245,7 @@ void curve25519(uint8_t *mypublic, const uint8_t *secret, const uint8_t *basepoi
 //     #define TLS_DH_DEFAULT_P            "B10B8F96A080E01DDE92DE5EAE5D54EC52C99FBCFB06A3C69A6A9DCA52D23B616073E28675A23D189838EF1E2EE652C013ECB4AEA906112324975C3CD49B83BFACCBDD7D90C4BD7098488E9C219A73724EFFD6FAE5644738FAA31A4FF55BCCC0A151AF5F0DC8B4BD45BF37DF365C1A65E68CFDA76D4DA708DF1FB2BC2E4A4371"
 //     #define TLS_DH_DEFAULT_G            "A4D1CBD5C3FD34126765A442EFB99905F8104DD258AC507FD6406CFF14266D31266FEA1E5C41564B777E690F5504F213160217B4B01B886A5E91547F9E2749F4D7FBD7D3B9A92EE1909D0D2263F80A76A6A24C087A091F531DBF0A0169B6A28AD662A4D18E73AFA32D779D5918D08BC8858F4DCEF97C2A24855E6EEB22B3B2E5"
 //     #define TLS_DHE_KEY_SIZE          1024
-// #endif
+// #endif */
 #endif
 
 #ifndef TLS_MALLOC
@@ -36675,6 +36802,11 @@ void _private_tls_poly1305_init(poly1305_context *ctx, const unsigned char key[3
 }
 
 static void _private_tls_poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t bytes) {
+#ifdef __MRC__
+/* MrC quits with a code generator error here at higher optimization levels. */
+#pragma options opt local
+#endif
+
     const unsigned long hibit = (st->final) ? 0 : (1UL << 24); /* 1 << 128 */
     unsigned long r0,r1,r2,r3,r4;
     unsigned long s1,s2,s3,s4;
@@ -39687,7 +39819,7 @@ void tls_certificate_set_algorithm(struct TLSContext *context, unsigned int *alg
         return;
     }
 
-    // client should fail on unsupported signature
+    /* client should fail on unsupported signature */
     if (!context->is_server) {
         DEBUG_PRINT0("UNSUPPORTED SIGNATURE ALGORITHM\n");
         context->critical_error = 1;
@@ -41967,7 +42099,7 @@ struct TLSPacket *tls_build_hello(struct TLSContext *context, int tls13_downgrad
 #ifdef TLS_CLIENT_ECDHE
 #ifdef TLS_WITH_CHACHA20_POLY1305
     #ifdef TLS_CLIENT_ECDSA
-                tls_packet_uint16(packet, TLS_CIPHERS_SIZE(16, 5));
+                tls_packet_uint16(packet, TLS_CIPHERS_SIZE(17, 5));
     #ifdef TLS_PREFER_CHACHA20
                 tls_packet_uint16(packet, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256);
     #endif
@@ -42033,8 +42165,9 @@ struct TLSPacket *tls_build_hello(struct TLSContext *context, int tls13_downgrad
                 tls_packet_uint16(packet, TLS_CIPHERS_SIZE(0, 5));
 #endif
                 /* tls_packet_uint16(packet, TLS_RSA_WITH_AES_256_GCM_SHA384); */
-#ifndef TLS_ROBOT_MITIGATION
+		/* acme.com grrrr */
                 tls_packet_uint16(packet, TLS_RSA_WITH_AES_128_GCM_SHA256);
+#ifndef TLS_ROBOT_MITIGATION
                 tls_packet_uint16(packet, TLS_RSA_WITH_AES_256_CBC_SHA256);
                 tls_packet_uint16(packet, TLS_RSA_WITH_AES_128_CBC_SHA256);
                 tls_packet_uint16(packet, TLS_RSA_WITH_AES_256_CBC_SHA);
@@ -43911,7 +44044,7 @@ int tls_parse_verify_tls13(struct TLSContext *context, const unsigned char *buf,
             break;
 #endif
         case 0x0804:
-            valid = _private_tls_verify_rsa(context, sha256, buf + 7, signature_size, signing_data, signing_data_len, 0); // ???
+            valid = _private_tls_verify_rsa(context, sha256, buf + 7, signature_size, signing_data, signing_data_len, 0); /* ??? */
             break;
         default:
             DEBUG_PRINT1("Unsupported signature: %x\n", (int)signature);
@@ -46663,6 +46796,7 @@ int tls_make_ktls(struct TLSContext *context, int socket) {
         case TLS_DHE_RSA_WITH_AES_128_GCM_SHA256:
         case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
         case TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+        case TLS_AES_128_GCM_SHA256:
             break;
         default:
             DEBUG_PRINT0("CIPHER UNSUPPORTED: kTLS SUPPORTS ONLY AES 128 GCM CIPHERS\n");
@@ -46675,15 +46809,22 @@ int tls_make_ktls(struct TLSContext *context, int socket) {
     }
     int err;
     struct tls12_crypto_info_aes_gcm_128 crypto_info;
-
-    crypto_info.info.version = TLS_1_2_VERSION;
     crypto_info.info.cipher_type = TLS_CIPHER_AES_GCM_128;
- 
     uint64_t local_sequence_number = htonll(context->local_sequence_number);
-    memcpy(crypto_info.iv, &local_sequence_number, TLS_CIPHER_AES_GCM_128_IV_SIZE);
-    memcpy(crypto_info.rec_seq, &local_sequence_number, TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
-    memcpy(crypto_info.key, context->exportable_keys, TLS_CIPHER_AES_GCM_128_KEY_SIZE);
-    memcpy(crypto_info.salt, context->crypto.ctx_local_mac.local_aead_iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+
+    if ((context->version == TLS_V12) || (context->version == DTLS_V12)) {
+        crypto_info.info.version = TLS_1_2_VERSION;
+        memcpy(crypto_info.iv, &local_sequence_number, TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        memcpy(crypto_info.rec_seq, &local_sequence_number, TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
+        memcpy(crypto_info.key, context->exportable_keys, TLS_CIPHER_AES_GCM_128_KEY_SIZE);
+        memcpy(crypto_info.salt, context->crypto.ctx_local_mac.local_aead_iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+    } else if ((context->version == TLS_V13) || (context->version == DTLS_V13)) {
+        crypto_info.info.version = TLS_1_3_VERSION;
+        memcpy(crypto_info.iv, context->crypto.ctx_local_mac.local_iv + 4, TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        memcpy(crypto_info.rec_seq, &local_sequence_number, TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
+        memcpy(crypto_info.key, context->exportable_keys, TLS_CIPHER_AES_GCM_128_KEY_SIZE);
+        memcpy(crypto_info.salt, context->crypto.ctx_local_mac.local_iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+    }
 
     err = setsockopt(socket, SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
     if (err)
@@ -46693,14 +46834,23 @@ int tls_make_ktls(struct TLSContext *context, int socket) {
     /* kernel 4.17 adds TLS_RX support */
     struct tls12_crypto_info_aes_gcm_128 crypto_info_read;
 
-    crypto_info_read.info.version = TLS_1_2_VERSION;
     crypto_info_read.info.cipher_type = TLS_CIPHER_AES_GCM_128;
 
     uint64_t remote_sequence_number = htonll(context->remote_sequence_number);
-    memcpy(crypto_info_read.iv, &remote_sequence_number, TLS_CIPHER_AES_GCM_128_IV_SIZE);
-    memcpy(crypto_info_read.rec_seq, &remote_sequence_number, TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
-    memcpy(crypto_info_read.key, context->exportable_keys + TLS_CIPHER_AES_GCM_128_KEY_SIZE, TLS_CIPHER_AES_GCM_128_KEY_SIZE);
-    memcpy(crypto_info_read.salt, context->crypto.ctx_remote_mac.remote_aead_iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+
+    if ((context->version == TLS_V12) || (context->version == DTLS_V12)) {
+        crypto_info_read.info.version = TLS_1_2_VERSION;
+        memcpy(crypto_info_read.iv, &remote_sequence_number, TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        memcpy(crypto_info_read.rec_seq, &remote_sequence_number, TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
+        memcpy(crypto_info_read.key, context->exportable_keys + TLS_CIPHER_AES_GCM_128_KEY_SIZE, TLS_CIPHER_AES_GCM_128_KEY_SIZE);
+        memcpy(crypto_info_read.salt, context->crypto.ctx_remote_mac.remote_aead_iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+    } else if ((context->version == TLS_V13) || (context->version == DTLS_V13)) {
+        crypto_info_read.info.version = TLS_1_3_VERSION;
+        memcpy(crypto_info_read.iv, context->crypto.ctx_remote_mac.remote_iv + 4, TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        memcpy(crypto_info_read.rec_seq, &remote_sequence_number, TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
+        memcpy(crypto_info_read.key, context->exportable_keys + TLS_CIPHER_AES_GCM_128_KEY_SIZE, TLS_CIPHER_AES_GCM_128_KEY_SIZE);
+        memcpy(crypto_info_read.salt, context->crypto.ctx_remote_mac.remote_iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+    }
 
     err = setsockopt(socket, SOL_TLS, TLS_RX, &crypto_info_read, sizeof(crypto_info_read));
     if (err)

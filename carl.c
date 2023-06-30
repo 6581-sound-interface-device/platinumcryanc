@@ -7,10 +7,21 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#if defined (M_XENIX) && !defined(M_UNIX)
+#include <sys/types.tcp.h>
+#endif
 #include <sys/socket.h>
-#if !defined(__AUX__) && !defined(__AMIGA__) && (!defined(NS_TARGET_MAJOR) || (NS_TARGET_MAJOR > 3)) && !defined(__MACHTEN_68K__) && !defined(__sun) && !defined(__BEOS__) && (!defined(__hppa) && !defined(__hpux))
+#if !defined (M_XENIX) || defined(_SCO_DS) /* On SCO Unix the next line crashes gcc, but on OpenServer it might work/be needed? */
+#if !defined(__AUX__) && !defined(__AMIGA__) && (!defined(NS_TARGET_MAJOR) || (NS_TARGET_MAJOR > 3)) && !defined(__MACHTEN_68K__) && !defined(__sun) && !defined(__BEOS__) && (!defined(__hppa) && !defined(__hpux)) && !defined(macintosh)
 #include <sys/select.h>
 #endif
+#endif
+
+#if defined(macintosh)
+#include <ioctl.h>
+#include <sys/filio.h>
+#endif
+
 #include <netinet/in.h>
 #include <netdb.h> 
 
@@ -27,6 +38,25 @@
 int quiet = 0;
 int proxy = 0;
 int http09 = 0;
+
+void error(char *msg, int code) {
+    if (proxy) {
+        if (!http09)
+            fprintf(stdout, "HTTP/1.0 502 Proxy Error\r\n"
+                            "Content-type: text/html\r\n\r\n");
+        fprintf(stdout, "%s\n", msg);
+        exit(code);
+    }
+
+    if (!quiet) {
+        if (errno > 0) perror(msg); else fprintf(stdout, "%s\n", msg);
+    }
+    exit(code);
+}
+
+void timeout() { /* portable enough */
+    error("Timeout", 254);
+}
 
 /* The BeOS port is bound by unusual constraints, partially by Metrowerks
    cc, partially by the operating system. Some of the code here is
@@ -55,27 +85,37 @@ int stdin_pending() {
     return (read(STDIN_FILENO, &c, 0) >= 0);
 }
 #else
+#if defined(macintosh)
+/* The MacOS port is also bound by unusual constraints because it's MacOS. */
+
+/* GUSI stdio isn't very std, so also check only in proxy mode. */
+#define stdin_pending() (proxy && FD_ISSET(STDIN_FILENO, &fdset))
+
+/* In a cooperative world connect() must be non-blocking. */
+void mac_connect(int sockfd, struct sockaddr *s, int ssize, char *err, int code) {
+    long m=1;
+    fd_set fdset;
+
+    (void)ioctl(sockfd, FIONBIO, &m);
+    m = connect(sockfd, s, ssize);
+    if (m < 0) {
+        /* GUSI might return any of these values for an in-progress socket */
+        if (errno != EISCONN && /* connected already? */
+                errno != EINPROGRESS &&
+                errno != EALREADY)
+            error(err, code);
+    }
+    /* wait for it to become writeable. GUSI calls WaitNextEvent for us,
+       so make the socket blocking again to preserve other semantics. */
+    m=0; (void)ioctl(sockfd, FIONBIO, &m);
+    FD_ZERO(&fdset);
+    FD_SET(sockfd, &fdset);
+    (void)select(sockfd + 1, NULL, &fdset, NULL, NULL);
+}
+#else
 #define stdin_pending() (FD_ISSET(STDIN_FILENO, &fdset))
 #endif
-
-void error(char *msg, int code) {
-    if (proxy) {
-        if (!http09)
-            fprintf(stdout, "HTTP/1.0 502 Proxy Error\r\n"
-                            "Content-type: text/html\r\n\r\n");
-        fprintf(stdout, "%s\n", msg);
-        exit(code);
-    }
-
-    if (!quiet) {
-        if (errno > 0) perror(msg); else fprintf(stdout, "%s\n", msg);
-    }
-    exit(code);
-}
-
-void timeout() { /* portable enough */
-    error("Timeout", 254);
-}
+#endif
 
 int https_send_pending(int client_sock, struct TLSContext *context) {
     unsigned int out_buffer_len = 0;
@@ -180,11 +220,11 @@ char *parse_url(char *url, char *hostname, size_t *port, size_t *proto) {
 }
 
 void help(int longdesc, char *me) {
-    fprintf(stderr, "Crypto Ancienne Resource Loader v2.0-git\n");
+    fprintf(stderr, "Crypto Ancienne Resource Loader v2.2\n");
     if (!longdesc) return;
 
     fprintf(stderr,
-"Copyright (C)2020-2 Cameron Kaiser and Contributors. All rights reserved.\n"
+"Copyright (C)2020-3 Cameron Kaiser and Contributors. All rights reserved.\n"
 "usage: %s [option] [url (optional if -p)]\n\n"
 "protocols: http https\n\n"
 "-h This message\n"
@@ -198,7 +238,11 @@ void help(int longdesc, char *me) {
 "-t No timeout (default is 10s)\n"
 "-u Upgrade HTTP requests to HTTPS transparently\n"
 "-s Spoof HTTP/1.1 replies as HTTP/1.0 (irrelevant without -H, -p or -i)\n"
+#if !defined(__BEOS__)
+/* Accepted but ignored, being limited to TLS 1.2. */
+"-3 Do not retry as TLS 1.2\n"
 "-2 Negotiate TLS 1.2 instead of 1.3\n"
+#endif
     , me);
 }
 
@@ -208,7 +252,7 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in serv_addr;
     struct hostent *server, *socksserver;
     fd_set fdset;
-    int read_size, tls12 = 0;
+    int read_size, tls12 = 0, tls13only = 0;
     int sent = 0, arg = 0, head_only = 0, with_headers = 0, upgrayedd = 0;
     char *path = NULL, *url = NULL, *proxyurl = NULL;
     struct TLSContext *context;
@@ -226,6 +270,7 @@ int main(int argc, char *argv[]) {
 #endif
 
     proxyurl = getenv("ALL_PROXY");
+    if (proxyurl != NULL && !strlen(proxyurl)) proxyurl = NULL;
 
     for(;;) {
         if (++arg >= argc) {
@@ -244,6 +289,7 @@ int main(int argc, char *argv[]) {
         if (strchr(argv[arg], 'i')) { with_headers = 1; }
         if (strchr(argv[arg], 'H')) { head_only = 1; with_headers = 1; }
         if (strchr(argv[arg], 'N')) { proxyurl = NULL; }
+        if (strchr(argv[arg], '3')) { tls13only = 1; }
         if (strchr(argv[arg], 'u')) { upgrayedd = 1; }
         if (strchr(argv[arg], 's')) { spoof10 = 1; }
         if (strchr(argv[arg], 't')) { forever = 1; }
@@ -396,7 +442,7 @@ int main(int argc, char *argv[]) {
                 if (strstr(++has_host, "Host: ")) return 1;
 
                 /* header is bogus? eat more of my shorts. */
-		if (proto != portno) { /* only allow host:port */
+                if (proto != portno) { /* only allow host:port */
                     if (!strstr((char *)read_buffer, hostport)) return 1;
                 } else { /* allow either */
                     if (!strstr((char *)read_buffer, hosthost) &&
@@ -468,11 +514,14 @@ int main(int argc, char *argv[]) {
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGALRM, timeout);
+retrial: /* considered harmful */
     if (!forever) (void)alarm(10);
     
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) 
         error("socket", 255);
+    /* nb: have to re-resolve during a fallback because we might have stale
+       data from other queries */
     server = gethostbyname(hostname);
     if (server == NULL) {
         if (proxy) error("Host not found", 2);
@@ -518,9 +567,14 @@ int main(int argc, char *argv[]) {
             memcpy((char *)&serv_addr.sin_addr.s_addr,
                    (char *)socksserver->h_addr, socksserver->h_length);
             serv_addr.sin_port = htons(socksport);
+#if defined(macintosh)
+            mac_connect(sockfd,(struct sockaddr *)&serv_addr,sizeof(serv_addr),
+                "connect to SOCKS", 4);
+#else
             if (connect(sockfd,(struct sockaddr *)&serv_addr,
                         sizeof(serv_addr)) < 0) 
                 error("connect to SOCKS", 4);
+#endif
 
             /* we should be able to send this much without blocking */
             if (send(sockfd, spacket, 9, 0) != 9)
@@ -552,8 +606,13 @@ int main(int argc, char *argv[]) {
     if (!proxycon) {
         memcpy((char *)&serv_addr.sin_addr.s_addr, (char *)server->h_addr, server->h_length);
         serv_addr.sin_port = htons(portno);
+#if defined(macintosh)
+        mac_connect(sockfd,(struct sockaddr *)&serv_addr,sizeof(serv_addr),
+           "connect", 5);
+#else
         if (connect(sockfd,(struct sockaddr *)&serv_addr,sizeof(serv_addr)) < 0) 
            error("connect", 5);
+#endif
     }
 
     /* set up http or tls */
@@ -685,6 +744,19 @@ int main(int argc, char *argv[]) {
                 if ((read_size = recv(sockfd, client_message, sizeof(client_message) , 0)) > 0) {
                     int i = tls_consume_stream(context, client_message, read_size, validate_certificate);
                     if (i < 0) {
+#if !defined(__BEOS__)
+                        /* only fallback if allowed and if during hello
+                           (elsewise it's an error) */
+                        if (!tls12 && !tls13only && (tls_established(context) < 1)) {
+#if DEBUG
+                            fprintf(stderr, "warning: failed tls 1.3, error %d, falling back\n", i);
+#endif
+                            tls12 = 1;
+                            close(sockfd);
+                            tls_destroy_context(context);
+                            goto retrial;
+                        }
+#endif
                         if (errno > 0) perror("tls_consume_stream");
                         if (!quiet) fprintf(stderr, "fatal TLS error: %d\n", i);
                         return 6;
